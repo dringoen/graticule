@@ -1,92 +1,112 @@
 module Graticule #:nodoc:
   module Geocoder #:nodoc:
-  
-    # First you need a Google Maps API key.  You can register for one here:
-    # http://www.google.com/apis/maps/signup.html
-    # 
-    #   gg = Graticule.service(:google).new(MAPS_API_KEY)
-    #   location = gg.locate '1600 Amphitheater Pkwy, Mountain View, CA'
+
+    # Example:
+    #
+    #   gg = Graticule.service(:google).new
+    #   location = gg.locate('1600 Amphitheater Pkwy, Mountain View, CA')
     #   p location.coordinates
-    #   #=> [37.423111, -122.081783
+    #   #=> [37.423111, -122.081783]
     #
     class Google < Base
-      # http://www.google.com/apis/maps/documentation/#Geocoding_HTTP_Request
-    
-      # http://www.google.com/apis/maps/documentation/reference.html#GGeoAddressAccuracy
       PRECISION = {
-        0 => Precision::Unknown,      # Unknown location.
-        1 => Precision::Country,      # Country level accuracy.
-        2 => Precision::Region,       # Region (state, province, prefecture, etc.) level accuracy.
-        3 => Precision::Region,       # Sub-region (county, municipality, etc.) level accuracy.
-        4 => Precision::Locality,     # Town (city, village) level accuracy.
-        5 => Precision::PostalCode,   # Post code (zip code) level accuracy.
-        6 => Precision::Street,       # Street level accuracy.
-        7 => Precision::Street,       # Intersection level accuracy.
-        8 => Precision::Address,      # Address level accuracy.
-        9 => Precision::Premise       # Premise (building name, property name, shopping center, etc.) level accuracy.
+        :political                   => Precision::Unknown,
+        :colloquial_area             => Precision::Unknown,
+        :natural_feature             => Precision::Unknown,
+        :country                     => Precision::Country,
+        :administrative_area_level_1 => Precision::Region,
+        :administrative_area_level_2 => Precision::Region,
+        :administrative_area_level_3 => Precision::Region,
+        :locality                    => Precision::Locality,
+        :sublocality                 => Precision::PostalCode,
+        :neighborhood                => Precision::PostalCode,
+        :postal_code                 => Precision::PostalCode,
+        :intersection                => Precision::Street,
+        :route                       => Precision::Street,
+        :street_address              => Precision::Address,
+        :premise                     => Precision::Premise,
+        :subpremise                  => Precision::Premise,
+        :airport                     => Precision::Premise,
+        :park                        => Precision::Premise,
+        :point_of_interest           => Precision::Premise
       }
 
-      def initialize(key)
-        @key = key
-        @url = URI.parse 'http://maps.google.com/maps/geo'
+      def initialize
+        @url = URI.parse('http://maps.google.com/maps/api/geocode/xml')
       end
 
       # Locates +address+ returning a Location
       def locate(address)
-        get :q => address.is_a?(String) ? address : location_from_params(address).to_s
+        get :address => address.is_a?(String) ? address : location_from_params(address).to_s
       end
 
-    private
-      class Address
-        include HappyMapper
-        tag 'AddressDetails'
-        namespace 'urn:oasis:names:tc:ciq:xsdschema:xAL:2.0'
+      private
 
-        attribute :accuracy, Integer, :tag => 'Accuracy'
-      end
-    
-      class Placemark
+      class AddressComponent
         include HappyMapper
-        tag 'Placemark'
-        element :coordinates, String, :deep => true
-        has_one :address, Address
-      
-        attr_reader :longitude, :latitude
-        delegate :accuracy, :to => :address, :allow_nil => true
-        
-        with_options :deep => true, :namespace => 'urn:oasis:names:tc:ciq:xsdschema:xAL:2.0' do |map|
-          map.element :street,      String, :tag => 'ThoroughfareName'
-          map.element :locality,    String, :tag => 'LocalityName'
-          map.element :region,      String, :tag => 'AdministrativeAreaName'
-          map.element :postal_code, String, :tag => 'PostalCodeNumber'
-          map.element :country,     String, :tag => 'CountryNameCode'
-        end
-      
-        def coordinates=(coordinates)
-          @longitude, @latitude, _ = coordinates.split(',').map { |v| v.to_f }
-        end
-      
+        tag 'address_component'
+        element :long_name, String
+        element :short_name, String
+        has_many :types, String, :tag => 'type'
+      end
+
+      class Result
+        include HappyMapper
+        tag 'result'
+        element :lat, Float, :deep => true
+        element :lng, Float, :deep => true
+        has_many :types, String, :tag => 'type'
+        has_many :address_components, AddressComponent
+
         def precision
-          PRECISION[accuracy] || :unknown
+          self.types.map { |type| PRECISION[type.to_sym] }.compact.min || :unknown
+        end
+
+        def street
+          address_component_value('route')
+        end
+
+        def locality
+          address_component_value('locality')
+        end
+
+        def postal_code
+          address_component_value('postal_code')
+        end
+
+        def country
+          address_component_value('country')
+        end
+
+        def region
+          address_component_value('administrative_area_level_1') ||
+          address_component_value('administrative_area_level_2') ||
+          address_component_value('administrative_area_level_3')
+        end
+
+        private
+
+        def address_component_value(address_component_type)
+          address_components.detect { |address_component| address_component.types.include?(address_component_type) }.try(:long_name)
         end
       end
-    
+
       class Response
         include HappyMapper
-        tag 'Response'
-        element :code, Integer, :tag => 'code', :deep => true
-        has_many :placemarks, Placemark
+        tag 'GeocodeResponse'
+        element :status, String
+        has_many :results, Result
       end
-      
+
       def prepare_response(xml)
         Response.parse(xml, :single => true)
       end
 
       def parse_response(response) #:nodoc:
-        result = response.placemarks.first
+        result = response.results.first
         Location.new(
-          :latitude    => result.latitude,
-          :longitude   => result.longitude,
+          :latitude    => result.lat,
+          :longitude   => result.lng,
           :street      => result.street,
           :locality    => result.locality,
           :region      => result.region,
@@ -98,29 +118,18 @@ module Graticule #:nodoc:
 
       # Extracts and raises an error from +xml+, if any.
       def check_error(response) #:nodoc:
-        case response.code
-        when 200 then # ignore, ok
-        when 500 then
-          raise Error, 'server error'
-        when 601 then
-          raise AddressError, 'missing address'
-        when 602 then
-          raise AddressError, 'unknown address'
-        when 603 then
-          raise AddressError, 'unavailable address'
-        when 610 then
-          raise CredentialsError, 'invalid key'
-        when 620 then
-          raise CredentialsError, 'too many queries'
-        else
-          raise Error, "unknown error #{response.code}"
+        case response.status
+        when 'OK'               then # No error, do nothing
+        when 'ZERO_RESULTS'     then raise AddressError.new('Address not found!')
+        when 'OVER_QUERY_LIMIT' then raise CredentialsError.new('Too many queries!')
+        when 'REQUEST_DENIED'   then raise CredentialsError.new('Request denied! Did you include the sensor parameter?')
+        when 'INVALID_REQUEST'  then raise CredentialsError.new('Invalid request. Did you include an address or latlng?')
+        else                         raise StandardError.new("Unknown error: #{response.code}")
         end
       end
 
-      # Creates a URL from the Hash +params+.
-      # sets the output type to 'xml'.
       def make_url(params) #:nodoc:
-        super params.merge(:key => @key, :oe => 'utf8', :output => 'xml', :sensor => false)
+        super params.merge(:sensor => false)
       end
     end
   end
