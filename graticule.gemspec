@@ -112,7 +112,6 @@ Gem::Specification.new do |s|
   s.rubygems_version = %q{1.3.5}
   s.summary = %q{API for using all the popular geocoding services.}
   s.test_files = [
-    "test/config.yml",
      "test/config.yml.default",
      "test/fixtures",
      "test/fixtures/responses",
